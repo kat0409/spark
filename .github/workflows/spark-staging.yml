@@ -1,0 +1,74 @@
+# Copy into .github/workflows/spark-staging.yml in YOUR apache/spark fork.
+# Keep this trusted workflow on the configured base branch. Candidate code
+# cannot edit this workflow through the agent's editable-path allow-list.
+name: Spark staging
+run-name: foundry-${{ inputs.operation_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact human-approved candidate commit
+        required: true
+        type: string
+      operation_id:
+        description: Foundry operation receipt
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: spark-staging-${{ inputs.operation_id }}
+  cancel-in-progress: false
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Configure this environment in the fork. Optional required reviewers
+    # depend on your GitHub plan; Foundry already requires tool approval.
+    environment: spark-staging
+    steps:
+      - name: Validate inputs
+        env:
+          CANDIDATE_SHA: ${{ inputs.commit_sha }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$OPERATION_ID" =~ ^[0-9a-f]{64}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            examples/src/main/python
+          sparse-checkout-cone-mode: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install fixed staging runtime
+        run: python -m pip install pyspark==4.0.1
+      - name: Validate and execute candidate job
+        env:
+          SPARK_LOCAL_IP: 127.0.0.1
+        run: |
+          python -m py_compile examples/src/main/python/pi.py
+          mkdir -p staging
+          set -o pipefail
+          spark-submit --master 'local[2]' examples/src/main/python/pi.py 2 2>&1 | tee staging/spark.log
+          grep -q 'Pi is roughly' staging/spark.log
+      - name: Package exact job and commit receipt
+        env:
+          CANDIDATE_SHA: ${{ inputs.commit_sha }}
+        run: |
+          cp examples/src/main/python/pi.py staging/
+          cp LICENSE NOTICE staging/
+          printf '%s\n' "$CANDIDATE_SHA" > staging/commit-sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spark-staging-${{ inputs.commit_sha }}
+          path: staging/
+          retention-days: 7
+          if-no-files-found: error
